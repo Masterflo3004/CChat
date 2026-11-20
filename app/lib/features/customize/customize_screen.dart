@@ -135,7 +135,7 @@ class _CustomizeScreenState extends ConsumerState<CustomizeScreen> {
                 const Padding(
                   padding: EdgeInsets.symmetric(horizontal: 16),
                   child: Text(
-                    'Your skin is the texture behind every message you send. '
+                    'A skin is the background and border of every message you send. '
                     'Everyone in the chat sees it.',
                   ),
                 ),
@@ -152,8 +152,14 @@ class _CustomizeScreenState extends ConsumerState<CustomizeScreen> {
                           for (final s in list)
                             RadioListTile<String?>(
                               value: s.id,
-                              title: Text(s.name),
-                              subtitle: Text('${s.fit.name} · text ${s.textColor}'),
+                              title: Row(
+                                children: [
+                                  _SkinChip(skinId: s.id),
+                                  const SizedBox(width: 12),
+                                  Flexible(child: Text(s.name, overflow: TextOverflow.ellipsis)),
+                                ],
+                              ),
+                              subtitle: Text(s.summary),
                               secondary: IconButton(
                                 tooltip: 'Delete skin',
                                 icon: const Icon(Icons.delete_outline),
@@ -256,6 +262,22 @@ class _Header extends StatelessWidget {
         Expanded(child: Text(title, style: Theme.of(context).textTheme.titleMedium)),
         TextButton.icon(onPressed: onAction, icon: const Icon(Icons.add), label: Text(action)),
       ],
+    ),
+  );
+}
+
+/// Small "Aa" bubble showing a skin's background and border.
+class _SkinChip extends ConsumerWidget {
+  const _SkinChip({required this.skinId});
+  final String skinId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => FutureBuilder(
+    future: ref.read(cosmeticsProvider).loadSkin(skinId),
+    builder: (context, snap) => SkinnedBubble(
+      mine: true,
+      style: ResolvedStyle(skin: snap.data),
+      child: (t) => Text('Aa', style: t),
     ),
   );
 }

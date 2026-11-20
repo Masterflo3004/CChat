@@ -91,7 +91,7 @@ The server only sees: conversation id, sender id, epoch, timestamp, ciphertext l
 
 ### Skins and fonts
 
-Message skins (bubble textures) and custom fonts are **profile cosmetics**, like an
+Message skins (background and border images and colours) and custom fonts are **profile cosmetics**, like an
 avatar. Other users must be able to download them to render your messages, so the
 files are readable by all signed-in users and are not end-to-end encrypted. *Which*
 skin and font a message uses is in the encrypted payload. Don't upload anything

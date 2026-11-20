@@ -228,6 +228,7 @@ class ChatMessage {
   final String? error;
 }
 
+/// How a background image fills the bubble.
 enum SkinFit { cover, tile, stretch, nineSlice }
 
 SkinFit skinFitFromDb(String s) => switch (s) {
@@ -244,40 +245,138 @@ String skinFitToDb(SkinFit f) => switch (f) {
   SkinFit.nineSlice => 'nine_slice',
 };
 
+/// What fills the message bubble.
+enum SkinBackground { theme, color, gradient, image }
+
+/// What is drawn around the message bubble.
+enum SkinBorder { none, solid, image }
+
+/// A message skin: background + border + shape + text colour.
 class MessageSkin {
   MessageSkin({
     required this.id,
     required this.ownerId,
     required this.name,
-    required this.imagePath,
-    required this.fit,
-    required this.sliceLeft,
-    required this.sliceTop,
-    required this.sliceRight,
-    required this.sliceBottom,
     required this.textColor,
+    this.background = SkinBackground.color,
+    this.bgColor,
+    this.bgColor2,
+    this.bgImagePath,
+    this.bgFit = SkinFit.cover,
+    this.sliceLeft = 0,
+    this.sliceTop = 0,
+    this.sliceRight = 0,
+    this.sliceBottom = 0,
+    this.border = SkinBorder.none,
+    this.borderColor,
+    this.borderWidth = 0,
+    this.borderRadius = 18,
+    this.borderImagePath,
+    this.borderSlice = 0,
   });
 
   final String id;
   final String ownerId;
   final String name;
-  final String imagePath;
-  final SkinFit fit;
-  final int sliceLeft, sliceTop, sliceRight, sliceBottom;
   final String textColor; // #RRGGBB
+
+  // Background
+  final SkinBackground background;
+  final String? bgColor; // #RRGGBB (color, gradient start)
+  final String? bgColor2; // #RRGGBB (gradient end)
+  final String? bgImagePath;
+  final SkinFit bgFit;
+  final int sliceLeft, sliceTop, sliceRight, sliceBottom; // background 9-slice insets (image px)
+
+  // Border
+  final SkinBorder border;
+  final String? borderColor;
+  final int borderWidth; // line width, or frame thickness on screen
+  final int borderRadius; // bubble corner radius
+  final String? borderImagePath;
+  final int borderSlice; // frame corner/edge size in the border image (image px)
 
   factory MessageSkin.fromRow(Map<String, dynamic> r) => MessageSkin(
     id: r['id'] as String,
     ownerId: r['owner_id'] as String,
     name: r['name'] as String,
-    imagePath: r['image_path'] as String,
-    fit: skinFitFromDb(r['fit'] as String),
+    textColor: r['text_color'] as String,
+    background: SkinBackground.values.byName(r['bg_type'] as String),
+    bgColor: r['bg_color'] as String?,
+    bgColor2: r['bg_color2'] as String?,
+    bgImagePath: r['bg_image_path'] as String?,
+    bgFit: skinFitFromDb(r['bg_fit'] as String),
     sliceLeft: r['slice_left'] as int,
     sliceTop: r['slice_top'] as int,
     sliceRight: r['slice_right'] as int,
     sliceBottom: r['slice_bottom'] as int,
-    textColor: r['text_color'] as String,
+    border: SkinBorder.values.byName(r['border_type'] as String),
+    borderColor: r['border_color'] as String?,
+    borderWidth: r['border_width'] as int,
+    borderRadius: r['border_radius'] as int,
+    borderImagePath: r['border_image_path'] as String?,
+    borderSlice: r['border_slice'] as int,
   );
+
+  /// Columns for an insert (image paths are filled in after upload).
+  Map<String, dynamic> toRow() => {
+    'owner_id': ownerId,
+    'name': name,
+    'text_color': textColor,
+    'bg_type': background.name,
+    'bg_color': background == SkinBackground.color || background == SkinBackground.gradient ? bgColor : null,
+    'bg_color2': background == SkinBackground.gradient ? bgColor2 : null,
+    'bg_image_path': background == SkinBackground.image ? bgImagePath : null,
+    'bg_fit': skinFitToDb(bgFit),
+    'slice_left': sliceLeft,
+    'slice_top': sliceTop,
+    'slice_right': sliceRight,
+    'slice_bottom': sliceBottom,
+    'border_type': border.name,
+    'border_color': border == SkinBorder.solid ? borderColor : null,
+    'border_width': border == SkinBorder.none ? 0 : borderWidth,
+    'border_radius': borderRadius,
+    'border_image_path': border == SkinBorder.image ? borderImagePath : null,
+    'border_slice': border == SkinBorder.image ? borderSlice : 0,
+  };
+
+  MessageSkin copyWith({String? id, String? ownerId, String? bgImagePath, String? borderImagePath}) => MessageSkin(
+    id: id ?? this.id,
+    ownerId: ownerId ?? this.ownerId,
+    name: name,
+    textColor: textColor,
+    background: background,
+    bgColor: bgColor,
+    bgColor2: bgColor2,
+    bgImagePath: bgImagePath ?? this.bgImagePath,
+    bgFit: bgFit,
+    sliceLeft: sliceLeft,
+    sliceTop: sliceTop,
+    sliceRight: sliceRight,
+    sliceBottom: sliceBottom,
+    border: border,
+    borderColor: borderColor,
+    borderWidth: borderWidth,
+    borderRadius: borderRadius,
+    borderImagePath: borderImagePath ?? this.borderImagePath,
+    borderSlice: borderSlice,
+  );
+
+  /// Short human description, e.g. "Gradient · image frame".
+  String get summary {
+    final bg = switch (background) {
+      SkinBackground.theme => 'Theme colour',
+      SkinBackground.color => 'Colour $bgColor',
+      SkinBackground.gradient => 'Gradient',
+      SkinBackground.image => 'Image (${bgFit.name})',
+    };
+    final b = switch (border) {
+      SkinBorder.none => 'no border',
+      SkinBorder.solid => '${borderWidth}px border',
+      SkinBorder.image => 'image frame',
+    };
+    return '$bg · $b';
+  }
 }
 
 class UserFont {

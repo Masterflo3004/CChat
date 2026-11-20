@@ -13,10 +13,17 @@ Flutter and Supabase.
   several devices. See [docs/E2EE.md](docs/E2EE.md).
 - **Text and GIFs.** You can search GIFs (GIPHY, proxied through an Edge Function) or upload your own,
   which are encrypted before upload.
-- **Message skins.** Upload an image as the texture behind your message bubbles (cover, tile,
-  stretch or 9-slice) and pick the text colour.
+- **Message skins:** design how your messages look to everyone:
+  - **Background:** theme colour, solid colour, gradient, or an image (cover, tile, stretch or 9-slice)
+  - **Border:** none, a line (colour and width), or an **image frame**: a decorative frame image
+    whose corners keep their shape while the edges stretch around the message
+  - Corner radius and text colour, with a live preview in the editor
 - **Custom fonts.** Upload a `.ttf` or `.otf` file and your messages are shown in it for everyone.
 - **Live updates** through Supabase Realtime, plus unread counts and safety numbers for verifying contacts.
+
+| Skins: background + border | Skin editor |
+|---|---|
+| ![Skins](docs/screenshots/skins.png) | ![Skin editor](docs/screenshots/skin-editor.png) |
 
 | Customize | Group info |
 |---|---|

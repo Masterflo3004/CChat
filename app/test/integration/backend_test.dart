@@ -219,12 +219,73 @@ void main() {
     final png = base64Decode(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
     );
+    // Image background (tiled) + image frame border.
     final skin = await alice.cosmetics.createSkin(
-      name: 'Pixel',
-      bytes: png,
-      extension: 'png',
-      fit: SkinFit.tile,
-      textColor: '#FFCC00',
+      SkinUpload(
+        skin: MessageSkin(
+          id: '',
+          ownerId: '',
+          name: 'Pixel',
+          textColor: '#FFCC00',
+          background: SkinBackground.image,
+          bgFit: SkinFit.tile,
+          border: SkinBorder.image,
+          borderWidth: 6,
+          borderSlice: 1,
+          borderRadius: 4,
+        ),
+        backgroundBytes: png,
+        backgroundExt: 'png',
+        borderBytes: png,
+        borderExt: 'png',
+      ),
+    );
+    expect(skin.bgImagePath, isNotNull);
+    expect(skin.borderImagePath, isNotNull);
+    expect(skin.border, SkinBorder.image);
+
+    // Gradient background + solid line border, no images.
+    final gradient = await alice.cosmetics.createSkin(
+      SkinUpload(
+        skin: MessageSkin(
+          id: '',
+          ownerId: '',
+          name: 'Sunset',
+          textColor: '#FFFFFF',
+          background: SkinBackground.gradient,
+          bgColor: '#FF5F6D',
+          bgColor2: '#FFC371',
+          border: SkinBorder.solid,
+          borderColor: '#000000',
+          borderWidth: 3,
+          borderRadius: 24,
+        ),
+      ),
+    );
+    expect(gradient.bgImagePath, isNull);
+    expect(gradient.summary, 'Gradient · 3px border');
+
+    // The database rejects incomplete skins (e.g. image frame without an image)
+    // and image paths outside the owner's folder.
+    await expectLater(
+      alice.client.from('message_skins').insert({
+        'owner_id': alice.id,
+        'name': 'broken',
+        'bg_type': 'theme',
+        'border_type': 'image',
+        'border_width': 4,
+        'border_slice': 4,
+      }),
+      throwsA(isA<PostgrestException>()),
+    );
+    await expectLater(
+      alice.client.from('message_skins').insert({
+        'owner_id': alice.id,
+        'name': 'stolen',
+        'bg_type': 'image',
+        'bg_image_path': '${bob.id}/x.png',
+      }),
+      throwsA(isA<PostgrestException>()),
     );
     final font = await alice.client
         .from('user_fonts')
@@ -237,7 +298,10 @@ void main() {
     // Bob can read the skin row and its image (needed to render alice's messages).
     final row = await bob.client.from('message_skins').select().eq('id', skin.id).single();
     expect(row['text_color'], '#FFCC00');
-    expect(await bob.client.storage.from('skins').download(skin.imagePath), png);
+    expect(row['bg_type'], 'image');
+    expect(row['border_type'], 'image');
+    expect(await bob.client.storage.from('skins').download(skin.bgImagePath!), png);
+    expect(await bob.client.storage.from('skins').download(skin.borderImagePath!), png);
 
     // Bob cannot upload into alice's folder or change her skin.
     await expectLater(
@@ -246,6 +310,11 @@ void main() {
     );
     final updated = await bob.client.from('message_skins').update({'name': 'pwned'}).eq('id', skin.id).select();
     expect(updated, isEmpty);
+    // Owners can rename, but not change the look of a skin already used in messages.
+    await expectLater(
+      alice.client.from('message_skins').update({'bg_type': 'theme'}).eq('id', skin.id),
+      throwsA(isA<PostgrestException>()),
+    );
 
     // Style travels inside the encrypted payload.
     final conv = await alice.chat.createDirectChat(await alice.chat.profile(bob.id));
@@ -256,8 +325,14 @@ void main() {
     expect(msg.payload!.style.fontId, font['id']);
 
     await alice.cosmetics.deleteSkin(skin);
+    await alice.cosmetics.deleteSkin(gradient);
     await alice.session.reloadProfile();
     expect(alice.session.me!.activeSkinId, isNull);
+    // Both images were removed from storage.
+    await expectLater(
+      alice.client.storage.from('skins').download(skin.borderImagePath!),
+      throwsA(isA<StorageException>()),
+    );
   });
 
   test('unlock on a second device with the passphrase', () async {

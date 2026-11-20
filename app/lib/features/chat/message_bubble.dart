@@ -42,25 +42,42 @@ class SkinnedBubble extends StatelessWidget {
     final textStyle = (theme.textTheme.bodyLarge ?? const TextStyle()).copyWith(
       color: textColor,
       fontFamily: style.fontFamily,
-      shadows: skin == null ? null : [Shadow(blurRadius: 3, color: Colors.black.withValues(alpha: 0.45))],
+      // Keep text readable on top of picture backgrounds.
+      shadows: skin?.skin.background == SkinBackground.image
+          ? [Shadow(blurRadius: 3, color: Colors.black.withValues(alpha: 0.45))]
+          : null,
     );
 
-    return Container(
-      constraints: const BoxConstraints(maxWidth: 420),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: skin == null ? baseColor : null,
-        image: skin?.decoration(),
-        borderRadius: BorderRadius.only(
-          topLeft: const Radius.circular(18),
-          topRight: const Radius.circular(18),
-          bottomLeft: Radius.circular(mine ? 18 : 4),
-          bottomRight: Radius.circular(mine ? 4 : 18),
+    const padding = EdgeInsets.symmetric(horizontal: 14, vertical: 10);
+    const constraints = BoxConstraints(maxWidth: 420);
+
+    if (skin == null) {
+      return Container(
+        constraints: constraints,
+        padding: padding,
+        decoration: BoxDecoration(
+          color: baseColor,
+          borderRadius: BorderRadius.only(
+            topLeft: const Radius.circular(18),
+            topRight: const Radius.circular(18),
+            bottomLeft: Radius.circular(mine ? 18 : 4),
+            bottomRight: Radius.circular(mine ? 4 : 18),
+          ),
         ),
-      ),
+        child: child(textStyle),
+      );
+    }
+
+    // Skin: background (+ solid border) inside, image frame painted on top.
+    final bubble = Container(
+      constraints: constraints,
+      padding: padding + EdgeInsets.all(skin.borderInset),
+      decoration: skin.decoration(baseColor),
       clipBehavior: Clip.antiAlias,
       child: child(textStyle),
     );
+    final frame = skin.framePainter();
+    return frame == null ? bubble : CustomPaint(foregroundPainter: frame, child: bubble);
   }
 }
 
