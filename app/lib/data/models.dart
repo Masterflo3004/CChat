@@ -147,41 +147,67 @@ class MessageStyle {
 }
 
 /// A GIF either from the GIF search (remote URL) or uploaded and encrypted by the sender.
+enum GifSource { remote, file, library }
+
+/// A GIF in a message:
+/// * [GifSource.library]: from the GIF library in Supabase Storage (hash-checked, moderated)
+/// * [GifSource.file]: sent privately, end-to-end encrypted with its own key
+/// * [GifSource.remote]: from the GIPHY search
 class GifContent {
-  GifContent.remote({required this.url, required this.width, required this.height, this.title})
-    : path = null,
-      fileKey = null;
+  GifContent.remote({required String this.url, required this.width, required this.height, this.title})
+    : source = GifSource.remote,
+      path = null,
+      fileKey = null,
+      gifId = null;
 
   GifContent.file({required String this.path, required String this.fileKey, required this.width, required this.height})
-    : url = null,
-      title = null;
+    : source = GifSource.file,
+      url = null,
+      title = null,
+      gifId = null;
 
+  GifContent.library({
+    required String this.gifId,
+    required String this.path,
+    required this.width,
+    required this.height,
+    this.title,
+  }) : source = GifSource.library,
+       url = null,
+       fileKey = null;
+
+  final GifSource source;
   final String? url;
   final String? title;
-  final String? path;
+  final String? path; // attachments bucket (file) or gifs bucket (library)
   final String? fileKey;
+  final String? gifId;
   final int width;
   final int height;
 
-  bool get isFile => path != null;
+  bool get isFile => source == GifSource.file;
 
-  Map<String, dynamic> toJson() => isFile
-      ? {'src': 'file', 'path': path, 'key': fileKey, 'w': width, 'h': height}
-      : {'src': 'remote', 'url': url, 'title': title, 'w': width, 'h': height};
+  Map<String, dynamic> toJson() => switch (source) {
+    GifSource.file => {'src': 'file', 'path': path, 'key': fileKey, 'w': width, 'h': height},
+    GifSource.library => {'src': 'library', 'id': gifId, 'path': path, 'title': title, 'w': width, 'h': height},
+    GifSource.remote => {'src': 'remote', 'url': url, 'title': title, 'w': width, 'h': height},
+  };
 
-  factory GifContent.fromJson(Map<String, dynamic> j) => j['src'] == 'file'
-      ? GifContent.file(
-          path: j['path'] as String,
-          fileKey: j['key'] as String,
-          width: (j['w'] as num).toInt(),
-          height: (j['h'] as num).toInt(),
-        )
-      : GifContent.remote(
-          url: j['url'] as String,
-          title: j['title'] as String?,
-          width: (j['w'] as num).toInt(),
-          height: (j['h'] as num).toInt(),
-        );
+  factory GifContent.fromJson(Map<String, dynamic> j) {
+    final w = (j['w'] as num?)?.toInt() ?? 0;
+    final h = (j['h'] as num?)?.toInt() ?? 0;
+    return switch (j['src']) {
+      'file' => GifContent.file(path: j['path'] as String, fileKey: j['key'] as String, width: w, height: h),
+      'library' => GifContent.library(
+        gifId: j['id'] as String,
+        path: j['path'] as String,
+        title: j['title'] as String?,
+        width: w,
+        height: h,
+      ),
+      _ => GifContent.remote(url: j['url'] as String, title: j['title'] as String?, width: w, height: h),
+    };
+  }
 }
 
 enum PayloadType { text, gif }
@@ -273,12 +299,14 @@ class MessageSkin {
     this.borderRadius = 18,
     this.borderImagePath,
     this.borderSlice = 0,
+    this.isPublic = false,
   });
 
   final String id;
   final String ownerId;
   final String name;
   final String textColor; // #RRGGBB
+  final bool isPublic; // listed in the community gallery
 
   // Background
   final SkinBackground background;
@@ -316,6 +344,7 @@ class MessageSkin {
     borderRadius: r['border_radius'] as int,
     borderImagePath: r['border_image_path'] as String?,
     borderSlice: r['border_slice'] as int,
+    isPublic: (r['is_public'] as bool?) ?? false,
   );
 
   /// Columns for an insert (image paths are filled in after upload).
@@ -338,6 +367,7 @@ class MessageSkin {
     'border_radius': borderRadius,
     'border_image_path': border == SkinBorder.image ? borderImagePath : null,
     'border_slice': border == SkinBorder.image ? borderSlice : 0,
+    'is_public': isPublic,
   };
 
   MessageSkin copyWith({String? id, String? ownerId, String? bgImagePath, String? borderImagePath}) => MessageSkin(
@@ -360,6 +390,7 @@ class MessageSkin {
     borderRadius: borderRadius,
     borderImagePath: borderImagePath ?? this.borderImagePath,
     borderSlice: borderSlice,
+    isPublic: isPublic,
   );
 
   /// Short human description, e.g. "Gradient · image frame".
@@ -380,11 +411,18 @@ class MessageSkin {
 }
 
 class UserFont {
-  UserFont({required this.id, required this.ownerId, required this.name, required this.filePath});
+  UserFont({
+    required this.id,
+    required this.ownerId,
+    required this.name,
+    required this.filePath,
+    this.isPublic = false,
+  });
   final String id;
   final String ownerId;
   final String name;
   final String filePath;
+  final bool isPublic;
 
   /// Family name the font is registered under via FontLoader.
   String get family => 'cchat_font_$id';
@@ -394,5 +432,148 @@ class UserFont {
     ownerId: r['owner_id'] as String,
     name: r['name'] as String,
     filePath: r['file_path'] as String,
+    isPublic: (r['is_public'] as bool?) ?? false,
+  );
+}
+
+/// A file uploaded through the upload-media function (hash-checked on the server).
+class MediaAsset {
+  MediaAsset({
+    required this.id,
+    required this.ownerId,
+    required this.kind,
+    required this.bucket,
+    required this.path,
+    required this.sha256,
+    required this.mime,
+    required this.sizeBytes,
+    this.width,
+    this.height,
+    this.bannedAt,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String ownerId;
+  final String kind; // gif | image | font | evidence
+  final String bucket;
+  final String path;
+  final String sha256;
+  final String mime;
+  final int sizeBytes;
+  final int? width;
+  final int? height;
+  final DateTime? bannedAt;
+  final DateTime createdAt;
+
+  factory MediaAsset.fromRow(Map<String, dynamic> r) => MediaAsset(
+    id: r['id'] as String,
+    ownerId: r['owner_id'] as String,
+    kind: r['kind'] as String,
+    bucket: r['bucket'] as String,
+    path: r['path'] as String,
+    sha256: r['sha256'] as String,
+    mime: r['mime'] as String,
+    sizeBytes: (r['size_bytes'] as num).toInt(),
+    width: (r['width'] as num?)?.toInt(),
+    height: (r['height'] as num?)?.toInt(),
+    bannedAt: r['banned_at'] == null ? null : DateTime.parse(r['banned_at'] as String),
+    createdAt: DateTime.parse(r['created_at'] as String).toLocal(),
+  );
+}
+
+/// A GIF in the library (community gallery or your own).
+class GifItem {
+  GifItem({
+    required this.id,
+    required this.ownerId,
+    required this.ownerUsername,
+    this.title,
+    required this.isPublic,
+    required this.assetId,
+    required this.path,
+    required this.width,
+    required this.height,
+  });
+
+  final String id;
+  final String ownerId;
+  final String ownerUsername;
+  final String? title;
+  final bool isPublic;
+  final String assetId;
+  final String path;
+  final int width;
+  final int height;
+
+  GifContent toContent() => GifContent.library(gifId: id, path: path, width: width, height: height, title: title);
+
+  factory GifItem.fromRow(Map<String, dynamic> r) => GifItem(
+    id: r['id'] as String,
+    ownerId: r['owner_id'] as String,
+    ownerUsername: r['owner_username'] as String,
+    title: r['title'] as String?,
+    isPublic: r['is_public'] as bool,
+    assetId: r['asset_id'] as String,
+    path: r['path'] as String,
+    width: (r['width'] as num?)?.toInt() ?? 0,
+    height: (r['height'] as num?)?.toInt() ?? 0,
+  );
+}
+
+/// Something in the community gallery, with its creator's username.
+class GalleryEntry<T> {
+  GalleryEntry(this.item, this.ownerUsername);
+  final T item;
+  final String ownerUsername;
+}
+
+enum ReportTarget { skin, font, gif, attachment }
+
+class Report {
+  Report({
+    required this.id,
+    required this.reporterId,
+    required this.targetType,
+    this.targetId,
+    this.evidenceAssetId,
+    required this.reason,
+    required this.status,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String reporterId;
+  final ReportTarget targetType;
+  final String? targetId;
+  final String? evidenceAssetId;
+  final String reason;
+  final String status;
+  final DateTime createdAt;
+
+  factory Report.fromRow(Map<String, dynamic> r) => Report(
+    id: r['id'] as String,
+    reporterId: r['reporter_id'] as String,
+    targetType: ReportTarget.values.byName(r['target_type'] as String),
+    targetId: r['target_id'] as String?,
+    evidenceAssetId: r['evidence_asset_id'] as String?,
+    reason: r['reason'] as String,
+    status: r['status'] as String,
+    createdAt: DateTime.parse(r['created_at'] as String).toLocal(),
+  );
+}
+
+class BannedHash {
+  BannedHash({required this.sha256, this.kind, this.reason, required this.createdAt});
+  final String sha256;
+  final String? kind;
+  final String? reason;
+  final DateTime createdAt;
+
+  factory BannedHash.fromRow(Map<String, dynamic> r) => BannedHash(
+    sha256: r['sha256'] as String,
+    kind: r['kind'] as String?,
+    reason: r['reason'] as String?,
+    createdAt: DateTime.parse(r['created_at'] as String).toLocal(),
   );
 }

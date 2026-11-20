@@ -1,4 +1,3 @@
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
@@ -7,6 +6,7 @@ import '../../core/ui.dart';
 import '../../data/models.dart';
 import '../../providers.dart';
 import '../chat/message_bubble.dart';
+import '../community/upload_flows.dart';
 import 'skin_editor.dart';
 
 /// Pick your message skin & font, manage uploads, see your safety number.
@@ -60,36 +60,65 @@ class _CustomizeScreenState extends ConsumerState<CustomizeScreen> {
     final created = await Navigator.of(context)
         .push<MessageSkin>(MaterialPageRoute(builder: (_) => const SkinEditorScreen()));
     if (created == null) return;
-    ref.invalidate(mySkinsProvider);
+    ref.invalidate(librarySkinsProvider);
     await _setActive(skinId: created.id);
   }
 
   Future<void> _addFont() async {
-    final file = await FilePicker.pickFile(type: FileType.custom, allowedExtensions: const ['ttf', 'otf']);
-    if (file == null) return;
-    await _run(() async {
-      final bytes = await file.readAsBytes();
-      final ext = (file.extension ?? '').replaceFirst('.', '');
-      final name = file.name.replaceAll(RegExp(r'\.(ttf|otf)$', caseSensitive: false), '');
-      final font = await ref
-          .read(cosmeticsProvider)
-          .uploadFont(
-            name: name.isEmpty ? 'My font' : (name.length > 40 ? name.substring(0, 40) : name),
-            bytes: bytes,
-            extension: ext,
-          );
-      ref.invalidate(myFontsProvider);
-      final me = ref.read(appSessionProvider).me;
-      await ref.read(cosmeticsProvider).setActive(skinId: me?.activeSkinId, fontId: font.id);
-      await _refreshPreview();
-    });
+    final font = await uploadFontFlow(context, ref);
+    if (font == null) return;
+    ref.invalidate(libraryFontsProvider);
+    await _setActive(fontId: font.id);
   }
+
+  void _reloadLibrary() {
+    ref.invalidate(librarySkinsProvider);
+    ref.invalidate(libraryFontsProvider);
+  }
+
+  /// Publish/unpublish + delete for your own items; "remove" for saved ones.
+  Widget _itemActions({
+    required bool own,
+    required bool isPublic,
+    required Future<void> Function(bool) setPublic,
+    required Future<void> Function() delete,
+    required Future<void> Function() unsave,
+  }) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      if (own)
+        IconButton(
+          tooltip: isPublic ? 'Shared in the gallery (tap to unshare)' : 'Share in the gallery',
+          icon: Icon(isPublic ? Icons.public : Icons.public_off_outlined),
+          onPressed: _busy
+              ? null
+              : () => _run(() async {
+                  await setPublic(!isPublic);
+                  _reloadLibrary();
+                }),
+        ),
+      IconButton(
+        tooltip: own ? 'Delete' : 'Remove from my library',
+        icon: Icon(own ? Icons.delete_outline : Icons.bookmark_remove_outlined),
+        onPressed: _busy
+            ? null
+            : () => _run(() async {
+                own ? await delete() : await unsave();
+                _reloadLibrary();
+                await ref.read(appSessionProvider).reloadProfile();
+                await _refreshPreview();
+              }),
+      ),
+    ],
+  );
 
   @override
   Widget build(BuildContext context) {
     final session = ref.watch(appSessionProvider);
-    final skins = ref.watch(mySkinsProvider);
-    final fonts = ref.watch(myFontsProvider);
+    final skins = ref.watch(librarySkinsProvider);
+    final fonts = ref.watch(libraryFontsProvider);
+    final isMod = ref.watch(isModeratorProvider).value ?? false;
+    final community = ref.read(communityProvider);
     final theme = Theme.of(context);
 
     return ListenableBuilder(
@@ -130,6 +159,28 @@ class _CustomizeScreenState extends ConsumerState<CustomizeScreen> {
                   ),
                 ),
 
+                Card(
+                  margin: const EdgeInsets.symmetric(horizontal: 16),
+                  child: ListTile(
+                    leading: const Icon(Icons.storefront_outlined),
+                    title: const Text('Community gallery'),
+                    subtitle: const Text('Browse, use and share skins, fonts and GIFs'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => context.go('/gallery'),
+                  ),
+                ),
+                if (isMod)
+                  Card(
+                    margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                    child: ListTile(
+                      leading: const Icon(Icons.shield_outlined),
+                      title: const Text('Moderation'),
+                      subtitle: const Text('Reports, recent uploads, banned files'),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () => context.go('/moderation'),
+                    ),
+                  ),
+
                 // Skins --------------------------------------------------------------
                 _Header(title: 'Message skins', action: 'Add skin', onAction: _busy ? null : _addSkin),
                 const Padding(
@@ -159,18 +210,17 @@ class _CustomizeScreenState extends ConsumerState<CustomizeScreen> {
                                   Flexible(child: Text(s.name, overflow: TextOverflow.ellipsis)),
                                 ],
                               ),
-                              subtitle: Text(s.summary),
-                              secondary: IconButton(
-                                tooltip: 'Delete skin',
-                                icon: const Icon(Icons.delete_outline),
-                                onPressed: _busy
-                                    ? null
-                                    : () => _run(() async {
-                                        await ref.read(cosmeticsProvider).deleteSkin(s);
-                                        ref.invalidate(mySkinsProvider);
-                                        await session.reloadProfile();
-                                        await _refreshPreview();
-                                      }),
+                              subtitle: Text(
+                                s.ownerId == session.userId
+                                    ? '${s.summary}${s.isPublic ? ' · shared' : ''}'
+                                    : '${s.summary} · from the gallery',
+                              ),
+                              secondary: _itemActions(
+                                own: s.ownerId == session.userId,
+                                isPublic: s.isPublic,
+                                setPublic: (v) => community.setSkinPublic(s.id, v),
+                                delete: () => ref.read(cosmeticsProvider).deleteSkin(s),
+                                unsave: () => community.unsave('skin', s.id),
                               ),
                             ),
                         ],
@@ -183,7 +233,7 @@ class _CustomizeScreenState extends ConsumerState<CustomizeScreen> {
                 _Header(title: 'Fonts', action: 'Upload font', onAction: _busy ? null : _addFont),
                 const Padding(
                   padding: EdgeInsets.symmetric(horizontal: 16),
-                  child: Text('Upload a .ttf or .otf file (max 2 MB). Make sure you are allowed to share it.'),
+                  child: Text('Upload a .ttf or .otf file (max 2 MB), or pick one from the gallery.'),
                 ),
                 RadioGroup<String?>(
                   groupValue: me?.activeFontId,
@@ -199,17 +249,17 @@ class _CustomizeScreenState extends ConsumerState<CustomizeScreen> {
                             RadioListTile<String?>(
                               value: f.id,
                               title: _FontName(font: f),
-                              secondary: IconButton(
-                                tooltip: 'Delete font',
-                                icon: const Icon(Icons.delete_outline),
-                                onPressed: _busy
-                                    ? null
-                                    : () => _run(() async {
-                                        await ref.read(cosmeticsProvider).deleteFont(f);
-                                        ref.invalidate(myFontsProvider);
-                                        await session.reloadProfile();
-                                        await _refreshPreview();
-                                      }),
+                              subtitle: Text(
+                                f.ownerId == session.userId
+                                    ? (f.isPublic ? 'Yours · shared' : 'Yours')
+                                    : 'From the gallery',
+                              ),
+                              secondary: _itemActions(
+                                own: f.ownerId == session.userId,
+                                isPublic: f.isPublic,
+                                setPublic: (v) => community.setFontPublic(f.id, v),
+                                delete: () => ref.read(cosmeticsProvider).deleteFont(f),
+                                unsave: () => community.unsave('font', f.id),
                               ),
                             ),
                         ],

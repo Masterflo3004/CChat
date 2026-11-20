@@ -12,7 +12,10 @@ import '../chat/message_bubble.dart';
 
 /// Create a skin: message background + message border + corner radius + text colour.
 class SkinEditorScreen extends ConsumerStatefulWidget {
-  const SkinEditorScreen({super.key});
+  const SkinEditorScreen({super.key, this.publishByDefault = false});
+
+  /// Pre-select "Share in the community gallery" (when opened from the gallery).
+  final bool publishByDefault;
 
   @override
   ConsumerState<SkinEditorScreen> createState() => _SkinEditorScreenState();
@@ -45,6 +48,7 @@ class _SkinEditorScreenState extends ConsumerState<SkinEditorScreen> {
   int _borderSlice = 16;
 
   Color _textColor = Colors.white;
+  late bool _public = widget.publishByDefault;
 
   @override
   void dispose() {
@@ -86,6 +90,7 @@ class _SkinEditorScreenState extends ConsumerState<SkinEditorScreen> {
     borderWidth: _borderWidth.round(),
     borderRadius: _radius.round(),
     borderSlice: _borderSlice,
+    isPublic: _public,
   );
 
   LoadedSkin get _preview => LoadedSkin(skin: _skin(), background: _bgImage?.image, border: _borderImage?.image);
@@ -172,6 +177,14 @@ class _SkinEditorScreenState extends ConsumerState<SkinEditorScreen> {
               maxLength: 40,
               decoration: const InputDecoration(labelText: 'Skin name', border: OutlineInputBorder()),
               onChanged: (_) => setState(() {}),
+            ),
+
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: _public,
+              onChanged: (v) => setState(() => _public = v),
+              title: const Text('Share in the community gallery'),
+              subtitle: const Text('Everyone can find and use it. Images are checked against the ban list.'),
             ),
 
             // Background --------------------------------------------------------

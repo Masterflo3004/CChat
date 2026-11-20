@@ -89,6 +89,19 @@ The server only sees: conversation id, sender id, epoch, timestamp, ciphertext l
   GIPHY's CDN, which exposes the viewer's IP address to GIPHY. Upload the GIF instead
   if that matters.
 
+### GIF library and moderation
+
+GIFs uploaded to the **GIF library** (and skin images and fonts) are public media: they
+are stored unencrypted in Supabase Storage so they can be shared, browsed and moderated
+(see [MODERATION.md](MODERATION.md)). A message that uses one contains only its id and
+path, inside the encrypted payload.
+
+GIFs sent with **"Send privately (encrypted)"** stay end-to-end encrypted. The server
+can't check them, so the clients do: the sender's app refuses to send a file whose
+SHA-256 is banned, and receiving apps hide such files. This works with the official
+app, but a modified client could skip the check. Reporting a private GIF uploads a
+decrypted copy for the moderators, only after the reporter confirms.
+
 ### Skins and fonts
 
 Message skins (background and border images and colours) and custom fonts are **profile cosmetics**, like an

@@ -13,7 +13,10 @@ import 'dart:typed_data';
 
 import 'package:cchat/data/models.dart';
 import 'package:cchat/services/chat_service.dart';
+import 'package:cchat/services/community_service.dart';
 import 'package:cchat/services/cosmetics_service.dart';
+import 'package:cchat/services/media_service.dart';
+import 'package:cchat/services/moderation_service.dart';
 import 'package:cchat/services/session.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -21,18 +24,38 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 final _url = Platform.environment['SUPABASE_URL'];
 final _key = Platform.environment['SUPABASE_PUBLISHABLE_KEY'];
+// Only used to make a test user a moderator.
+final _serviceKey = Platform.environment['SUPABASE_SERVICE_ROLE_KEY'];
 
 class TestUser {
-  TestUser(this.name, this.client, this.session)
-    : chat = ChatService(client, session),
-      cosmetics = CosmeticsService(client, session);
+  TestUser(this.name, this.client, this.session) : chat = ChatService(client, session), media = MediaService(client) {
+    cosmetics = CosmeticsService(client, session, media);
+    community = CommunityService(client, session, media);
+    moderation = ModerationService(client);
+  }
   final String name;
   final SupabaseClient client;
   final AppSession session;
   final ChatService chat;
-  final CosmeticsService cosmetics;
+  final MediaService media;
+  late final CosmeticsService cosmetics;
+  late final CommunityService community;
+  late final ModerationService moderation;
   String get id => session.userId!;
 }
+
+/// Unique fake files (the server sniffs magic bytes, it doesn't decode them).
+Uint8List _fakeGif([int w = 40, int h = 30]) => Uint8List.fromList([
+  ...utf8.encode('GIF89a'),
+  w & 0xff,
+  w >> 8,
+  h & 0xff,
+  h >> 8,
+  ...utf8.encode('${DateTime.now().microsecondsSinceEpoch}-${_counter++}'),
+]);
+Uint8List _fakeFont() =>
+    Uint8List.fromList([0, 1, 0, 0, ...utf8.encode('font-${DateTime.now().microsecondsSinceEpoch}-${_counter++}')]);
+var _counter = 0;
 
 Future<void> _until(bool Function() cond, {Duration timeout = const Duration(seconds: 20)}) async {
   final end = DateTime.now().add(timeout);
@@ -90,16 +113,21 @@ void main() {
     // A second DM between the same people returns the same conversation.
     expect(await bob.chat.createDirectChat(await bob.chat.profile(alice.id)), conv);
 
-    // Bob listens via Realtime.
+    // Bob listens via Realtime. Wait for the initial snapshot so the subscription is
+    // set up before alice sends (Realtime can take a moment right after a DB reset).
     final received = <RawMessage>[];
+    var snapshots = 0;
     final sub = bob.chat.watchMessages(conv).listen((list) {
+      snapshots++;
       received
         ..clear()
         ..addAll(list);
     });
+    await _until(() => snapshots > 0);
+    await Future<void>.delayed(const Duration(seconds: 2));
 
     await alice.chat.send(conv, MessagePayload.text('hi bob 👋', style: const MessageStyle(skinId: null)));
-    await _until(() => received.isNotEmpty);
+    await _until(() => received.isNotEmpty, timeout: const Duration(seconds: 60));
     await sub.cancel();
 
     final raw = received.first;
@@ -287,12 +315,14 @@ void main() {
       }),
       throwsA(isA<PostgrestException>()),
     );
-    final font = await alice.client
-        .from('user_fonts')
-        .insert({'owner_id': alice.id, 'name': 'Fake', 'file_path': '${alice.id}/fake.ttf'})
-        .select()
-        .single();
-    await alice.cosmetics.setActive(skinId: skin.id, fontId: font['id'] as String);
+    final uploadedFont = await alice.cosmetics.uploadFont(name: 'Fake', bytes: _fakeFont(), extension: 'ttf');
+    final font = {'id': uploadedFont.id};
+    // Font rows must point at a hash-checked upload of the owner.
+    await expectLater(
+      alice.client.from('user_fonts').insert({'owner_id': alice.id, 'name': 'x', 'file_path': '${alice.id}/x.ttf'}),
+      throwsA(isA<PostgrestException>()),
+    );
+    await alice.cosmetics.setActive(skinId: skin.id, fontId: font['id']);
     expect(alice.cosmetics.activeStyle.skinId, skin.id);
 
     // Bob can read the skin row and its image (needed to render alice's messages).
@@ -303,9 +333,13 @@ void main() {
     expect(await bob.client.storage.from('skins').download(skin.bgImagePath!), png);
     expect(await bob.client.storage.from('skins').download(skin.borderImagePath!), png);
 
-    // Bob cannot upload into alice's folder or change her skin.
+    // Nobody can write to the public buckets directly (bypassing the hash check).
     await expectLater(
       bob.client.storage.from('skins').uploadBinary('${alice.id}/evil.png', png),
+      throwsA(isA<StorageException>()),
+    );
+    await expectLater(
+      alice.client.storage.from('skins').uploadBinary('${alice.id}/direct.png', png),
       throwsA(isA<StorageException>()),
     );
     final updated = await bob.client.from('message_skins').update({'name': 'pwned'}).eq('id', skin.id).select();
@@ -333,6 +367,162 @@ void main() {
       alice.client.storage.from('skins').download(skin.borderImagePath!),
       throwsA(isA<StorageException>()),
     );
+  });
+
+  test('GIF library: upload, gallery, privacy of unlisted GIFs, direct writes blocked', () async {
+    final gif = await alice.community.uploadGif(bytes: _fakeGif(), filename: 'cat.gif', title: 'Dancing cat');
+    expect(gif.width, 40); // read from the GIF header on the server
+    expect(gif.height, 30);
+
+    final community = await bob.community.gifs();
+    expect(community.map((g) => g.id), contains(gif.id));
+    expect(await bob.media.download('gifs', gif.path), isNotEmpty);
+
+    final hidden = await alice.community.uploadGif(bytes: _fakeGif(), filename: 'x.gif', isPublic: false);
+    expect((await bob.community.gifs()).map((g) => g.id), isNot(contains(hidden.id)));
+    expect((await alice.community.gifs(mine: true)).map((g) => g.id), containsAll([gif.id, hidden.id]));
+
+    // Search by title.
+    expect((await bob.community.gifs(query: 'dancing')).map((g) => g.id), contains(gif.id));
+
+    // Bob can't claim alice's file, and nobody uploads to the bucket directly.
+    await expectLater(
+      bob.client.from('gifs').insert({'owner_id': bob.id, 'asset_id': gif.assetId}),
+      throwsA(isA<PostgrestException>()),
+    );
+    await expectLater(
+      bob.client.storage.from('gifs').uploadBinary('${bob.id}/x.gif', _fakeGif()),
+      throwsA(isA<StorageException>()),
+    );
+
+    // Wrong file type is rejected by content, not by name.
+    await expectLater(
+      alice.media.upload(kind: 'gif', bytes: Uint8List.fromList(utf8.encode('not a gif')), filename: 'a.gif'),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    // Library GIFs can be sent in (encrypted) messages.
+    final conv = await alice.chat.createDirectChat(await alice.chat.profile(bob.id));
+    await alice.chat.send(conv, MessagePayload.gif(gif.toContent()));
+    final msg = await bob.chat.decrypt((await _rows(bob, conv)).last);
+    expect(msg.payload!.gif!.source, GifSource.library);
+    expect(msg.payload!.gif!.gifId, gif.id);
+  });
+
+  test('gallery: publish skins and fonts, others can save and use them', () async {
+    final skin = await alice.cosmetics.createSkin(
+      SkinUpload(
+        skin: MessageSkin(
+          id: '',
+          ownerId: '',
+          name: 'Public sunset',
+          textColor: '#FFFFFF',
+          background: SkinBackground.gradient,
+          bgColor: '#FF5F6D',
+          bgColor2: '#FFC371',
+          isPublic: true,
+        ),
+      ),
+    );
+    final private = await alice.cosmetics.createSkin(
+      SkinUpload(
+        skin: MessageSkin(id: '', ownerId: '', name: 'Secret', textColor: '#FFFFFF', bgColor: '#000000'),
+      ),
+    );
+    final font = await alice.cosmetics.uploadFont(name: 'Shared', bytes: _fakeFont(), extension: 'ttf', isPublic: true);
+
+    final skins = await bob.community.gallerySkins();
+    expect(skins.map((e) => e.item.id), contains(skin.id));
+    expect(skins.map((e) => e.item.id), isNot(contains(private.id)));
+    expect(skins.firstWhere((e) => e.item.id == skin.id).ownerUsername, alice.session.me!.username);
+    expect((await bob.community.galleryFonts()).map((e) => e.item.id), contains(font.id));
+
+    await bob.community.save('skin', skin.id);
+    await bob.community.save('font', font.id);
+    expect((await bob.community.savedSkins()).map((s) => s.id), [skin.id]);
+    expect((await bob.community.savedFonts()).map((f) => f.id), [font.id]);
+    await bob.cosmetics.setActive(skinId: skin.id, fontId: font.id); // using someone else's skin is allowed
+
+    // Alice unpublishes: gone from the gallery.
+    await alice.community.setSkinPublic(skin.id, false);
+    expect((await bob.community.gallerySkins()).map((e) => e.item.id), isNot(contains(skin.id)));
+    // Bob can't publish alice's skin.
+    final changed = await bob.client.from('message_skins').update({'is_public': true}).eq('id', skin.id).select();
+    expect(changed, isEmpty);
+    await bob.cosmetics.setActive(skinId: null, fontId: null);
+  });
+
+  test('moderation: report, hash ban deletes all copies and blocks re-uploads', () async {
+    if (_serviceKey == null) {
+      markTestSkipped('SUPABASE_SERVICE_ROLE_KEY not set (needed to create a moderator)');
+      return;
+    }
+    final service = SupabaseClient(_url!, _serviceKey!);
+    await service.from('moderators').upsert({'user_id': carol.id});
+    expect(await carol.moderation.isModerator(), isTrue);
+    expect(await bob.moderation.isModerator(), isFalse);
+
+    final bytes = _fakeGif();
+    final gif = await bob.community.uploadGif(bytes: bytes, filename: 'bad.gif', title: 'bad');
+    // Same file as a skin image by another user (different bucket): also banned later.
+    final copy = await alice.media.upload(kind: 'gif', bytes: bytes, filename: 'copy.gif');
+
+    await alice.community.report(ReportTarget.gif, gif.id, 'offensive');
+    await alice.community.report(ReportTarget.gif, gif.id, 'again'); // duplicate open report is ignored
+    expect(await bob.client.from('reports').select(), isEmpty); // reports are private
+
+    final reports = await carol.moderation.openReports();
+    final report = reports.firstWhere((r) => r.targetId == gif.id);
+    expect(report.reason, 'offensive');
+    expect(reports.where((r) => r.targetId == gif.id).length, 1);
+
+    // Only moderators can act.
+    await expectLater(bob.moderation.banAsset(gif.assetId, 'nope'), throwsA(isA<FunctionException>()));
+
+    final deleted = await carol.moderation.banAsset(gif.assetId, 'offensive GIF');
+    expect(deleted, 2); // bob's and alice's copy
+
+    // Files are gone, GIF is out of the gallery, report closed.
+    await expectLater(alice.client.storage.from('gifs').download(gif.path), throwsA(isA<StorageException>()));
+    await expectLater(alice.client.storage.from('gifs').download(copy.path), throwsA(isA<StorageException>()));
+    expect((await alice.community.gifs()).map((g) => g.id), isNot(contains(gif.id)));
+    expect((await carol.moderation.openReports()).where((r) => r.id == report.id), isEmpty);
+
+    // Re-uploading the same file is refused for everyone.
+    await expectLater(
+      bob.community.uploadGif(bytes: bytes, filename: 'again.gif'),
+      throwsA(isA<BannedFileException>()),
+    );
+    await expectLater(
+      alice.media.upload(kind: 'image', bytes: bytes, filename: 'sneaky.gif'),
+      throwsA(isA<BannedFileException>()),
+    );
+
+    // End-to-end encrypted attachments are checked by the clients.
+    expect(await alice.media.isBanned(bytes), isTrue);
+    expect(await alice.media.isBanned(_fakeGif()), isFalse);
+
+    final banned = await carol.moderation.bannedHashes();
+    final hash = await MediaService.sha256Hex(bytes);
+    expect(banned.map((b) => b.sha256), contains(hash));
+    expect(await bob.client.from('banned_hashes').select(), isEmpty); // list is moderators-only
+
+    // Unban: uploads work again.
+    await carol.moderation.unban(hash);
+    final again = await bob.media.upload(kind: 'gif', bytes: bytes, filename: 'ok.gif');
+    expect(again.sha256, hash);
+
+    // Reporting an encrypted attachment shares a decrypted copy with moderators only.
+    final evidence = _fakeGif();
+    await alice.community.reportAttachment(evidence, 'evidence.gif', 'sent to me in a chat');
+    final attReport = (await carol.moderation.openReports()).firstWhere((r) => r.targetType == ReportTarget.attachment);
+    final evAsset = (await carol.moderation.asset(attReport.evidenceAssetId!))!;
+    expect(await carol.client.storage.from('evidence').download(evAsset.path), evidence);
+    await expectLater(bob.client.storage.from('evidence').download(evAsset.path), throwsA(isA<StorageException>()));
+
+    // Dismiss.
+    await carol.moderation.dismiss(attReport.id);
+    expect((await carol.moderation.openReports()).where((r) => r.id == attReport.id), isEmpty);
   });
 
   test('unlock on a second device with the passphrase', () async {

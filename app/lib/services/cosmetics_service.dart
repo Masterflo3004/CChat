@@ -3,9 +3,9 @@ import 'dart:ui' as ui;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:uuid/uuid.dart';
 
 import '../data/models.dart';
+import 'media_service.dart';
 import 'session.dart';
 
 Color parseHexColor(String hex) => Color(int.parse('FF${hex.substring(1)}', radix: 16));
@@ -152,11 +152,11 @@ class SkinUpload {
 
 /// Message skins (background + border) and custom fonts.
 class CosmeticsService {
-  CosmeticsService(this.client, this.session);
+  CosmeticsService(this.client, this.session, this.media);
 
   final SupabaseClient client;
   final AppSession session;
-  static const _uuid = Uuid();
+  final MediaService media;
 
   static const maxSkinBytes = 5 * 1024 * 1024;
   static const maxFontBytes = 2 * 1024 * 1024;
@@ -175,51 +175,56 @@ class CosmeticsService {
     return [for (final r in rows) MessageSkin.fromRow(r)];
   }
 
-  static String _imageMime(String ext) => switch (ext.toLowerCase()) {
-    'png' => 'image/png',
-    'jpg' || 'jpeg' => 'image/jpeg',
-    'webp' => 'image/webp',
-    'gif' => 'image/gif',
-    _ => throw ArgumentError('Unsupported image type .$ext'),
-  };
-
+  /// Uploads through `upload-media`, which hash-checks the file against the ban list.
   Future<String> _uploadImage(Uint8List bytes, String ext) async {
     if (bytes.length > maxSkinBytes) throw ArgumentError('Skin images must be at most 5 MB');
-    final path = '$_uid/${_uuid.v4()}.${ext.toLowerCase()}';
-    await client.storage
-        .from('skins')
-        .uploadBinary(path, bytes, fileOptions: FileOptions(contentType: _imageMime(ext)));
-    return path;
+    final asset = await media.upload(kind: 'image', bytes: bytes, filename: 'skin.${ext.toLowerCase()}');
+    return asset.path;
+  }
+
+  /// Removes an uploaded file once none of your skins/fonts use it any more.
+  Future<void> _cleanup(String bucket, String path) async {
+    final stillUsed = bucket == 'skins'
+        ? await client
+              .from('message_skins')
+              .select('id')
+              .eq('owner_id', _uid)
+              .or('bg_image_path.eq.$path,border_image_path.eq.$path')
+              .limit(1)
+        : await client.from('user_fonts').select('id').eq('owner_id', _uid).eq('file_path', path).limit(1);
+    if (stillUsed.isNotEmpty) return;
+    await client.from('media_assets').delete().eq('path', path);
+    await client.storage.from(bucket).remove([path]);
   }
 
   Future<MessageSkin> createSkin(SkinUpload upload) async {
     var skin = upload.skin.copyWith(ownerId: _uid);
-    final uploaded = <String>[];
     try {
       if (skin.background == SkinBackground.image) {
         if (upload.backgroundBytes == null) throw ArgumentError('Choose a background image');
         final p = await _uploadImage(upload.backgroundBytes!, upload.backgroundExt ?? 'png');
-        uploaded.add(p);
         skin = skin.copyWith(bgImagePath: p);
       }
       if (skin.border == SkinBorder.image) {
         if (upload.borderBytes == null) throw ArgumentError('Choose a border image');
         final p = await _uploadImage(upload.borderBytes!, upload.borderExt ?? 'png');
-        uploaded.add(p);
         skin = skin.copyWith(borderImagePath: p);
       }
       final row = await client.from('message_skins').insert(skin.toRow()).select().single();
       return MessageSkin.fromRow(row);
     } catch (_) {
-      if (uploaded.isNotEmpty) await client.storage.from('skins').remove(uploaded).catchError((_) => <FileObject>[]);
+      for (final p in [?skin.bgImagePath, ?skin.borderImagePath]) {
+        await _cleanup('skins', p).catchError((_) {});
+      }
       rethrow;
     }
   }
 
   Future<void> deleteSkin(MessageSkin skin) async {
     await client.from('message_skins').delete().eq('id', skin.id);
-    final paths = [?skin.bgImagePath, ?skin.borderImagePath];
-    if (paths.isNotEmpty) await client.storage.from('skins').remove(paths);
+    for (final p in {?skin.bgImagePath, ?skin.borderImagePath}) {
+      await _cleanup('skins', p);
+    }
     _skins.remove(skin.id);
   }
 
@@ -230,7 +235,7 @@ class CosmeticsService {
           if (row == null) return null; // deleted skin -> default look
           final skin = MessageSkin.fromRow(row);
           Future<SkinImage?> img(String? path) async =>
-              path == null ? null : SkinImage.decode(await client.storage.from('skins').download(path));
+              path == null ? null : SkinImage.decode(await media.download('skins', path));
           final images = await Future.wait([
             img(skin.background == SkinBackground.image ? skin.bgImagePath : null),
             img(skin.border == SkinBorder.image ? skin.borderImagePath : null),
@@ -260,27 +265,29 @@ class CosmeticsService {
     return [for (final r in rows) UserFont.fromRow(r)];
   }
 
-  Future<UserFont> uploadFont({required String name, required Uint8List bytes, required String extension}) async {
+  Future<UserFont> uploadFont({
+    required String name,
+    required Uint8List bytes,
+    required String extension,
+    bool isPublic = false,
+  }) async {
     final ext = extension.toLowerCase();
     if (ext != 'ttf' && ext != 'otf') throw ArgumentError('Fonts must be .ttf or .otf');
     if (bytes.length > maxFontBytes) throw ArgumentError('Font file must be at most 2 MB');
-    final path = '$_uid/${_uuid.v4()}.$ext';
-    await client.storage
-        .from('fonts')
-        .uploadBinary(path, bytes, fileOptions: FileOptions(contentType: ext == 'otf' ? 'font/otf' : 'font/ttf'));
+    final asset = await media.upload(kind: 'font', bytes: bytes, filename: 'font.$ext');
     final row = await client
         .from('user_fonts')
-        .insert({'owner_id': _uid, 'name': name, 'file_path': path})
+        .insert({'owner_id': _uid, 'name': name, 'file_path': asset.path, 'is_public': isPublic})
         .select()
         .single();
     final font = UserFont.fromRow(row);
-    _fonts[font.id] = _register(font.family, bytes);
+    _fonts[font.id] = _register(font.family, bytes).catchError((_) => null);
     return font;
   }
 
   Future<void> deleteFont(UserFont font) async {
     await client.from('user_fonts').delete().eq('id', font.id);
-    await client.storage.from('fonts').remove([font.filePath]);
+    await _cleanup('fonts', font.filePath);
   }
 
   static Future<String?> _register(String family, Uint8List bytes) async {
@@ -296,7 +303,7 @@ class CosmeticsService {
           final row = await client.from('user_fonts').select().eq('id', id).maybeSingle();
           if (row == null) return null;
           final font = UserFont.fromRow(row);
-          final bytes = await client.storage.from('fonts').download(font.filePath);
+          final bytes = await media.download('fonts', font.filePath);
           return _register(font.family, bytes);
         }()..catchError((Object _) {
           _fonts.remove(id);

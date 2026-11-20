@@ -19,11 +19,22 @@ Flutter and Supabase.
     whose corners keep their shape while the edges stretch around the message
   - Corner radius and text colour, with a live preview in the editor
 - **Custom fonts.** Upload a `.ttf` or `.otf` file and your messages are shown in it for everyone.
+- **GIF library in Supabase Storage.** Upload your own GIFs (public or unlisted) and send them from the
+  *Community* / *My GIFs* tabs of the GIF picker. You can also send a GIF privately (end-to-end encrypted).
+- **Community gallery.** Everyone can publish skins, fonts and GIFs. Others can browse, save, use and report them.
+- **Moderation by file hash.** Every public upload goes through the `upload-media` Edge Function, which
+  computes the SHA-256 on the server and refuses banned files. Moderators review reports and recent
+  uploads, and can ban a file: every copy is deleted and identical re-uploads are blocked. See
+  [docs/MODERATION.md](docs/MODERATION.md).
 - **Live updates** through Supabase Realtime, plus unread counts and safety numbers for verifying contacts.
 
 | Skins: background + border | Skin editor |
 |---|---|
 | ![Skins](docs/screenshots/skins.png) | ![Skin editor](docs/screenshots/skin-editor.png) |
+
+| Community gallery | Moderation |
+|---|---|
+| ![Gallery](docs/screenshots/gallery.png) | ![Moderation](docs/screenshots/moderation.png) |
 
 | Customize | Group info |
 |---|---|
@@ -39,7 +50,9 @@ app/                    Flutter app (web, android, linux, windows)
   test/                 crypto unit tests + integration tests against local Supabase
 supabase/
   migrations/           schema, RLS policies, RPCs, storage buckets
-  functions/gif-search/ Edge Function (GIF search proxy)
+  functions/upload-media/ Edge Function: server-side hash check + upload of public media
+  functions/moderate/    Edge Function: moderator actions (ban hash, unban, unpublish, dismiss)
+  functions/gif-search/  Edge Function: GIPHY search proxy
 docs/E2EE.md            encryption design and limitations
 TECHSTACK.md            tech stack decisions
 ```
@@ -64,8 +77,17 @@ supabase status         # shows API URL and publishable key
 ```bash
 supabase link --project-ref <your-project-ref>
 supabase db push
-supabase secrets set GIPHY_API_KEY=<key from developers.giphy.com>
+supabase secrets set GIPHY_API_KEY=<key from developers.giphy.com>   # optional, for GIPHY search
+supabase functions deploy upload-media
+supabase functions deploy moderate
 supabase functions deploy gif-search
+```
+
+Make yourself a moderator (SQL editor in the dashboard, or `psql`):
+
+```sql
+insert into public.moderators (user_id)
+select id from public.profiles where username = 'your_username';
 ```
 
 Under *Authentication → URL configuration*, add your web app's URL. Turn email
@@ -99,7 +121,8 @@ Platform notes:
 cd app
 flutter test                                   # crypto unit tests
 # integration tests against the local stack (RLS, key rotation, realtime, storage):
-SUPABASE_URL=http://127.0.0.1:54321 SUPABASE_PUBLISHABLE_KEY=<from supabase status> flutter test
+SUPABASE_URL=http://127.0.0.1:54321 SUPABASE_PUBLISHABLE_KEY=<from supabase status> \
+  SUPABASE_SERVICE_ROLE_KEY=<from supabase status, only used to create a test moderator> flutter test
 ```
 
 CI (`.github/workflows/ci.yml`) starts a local Supabase, lints the database, runs all

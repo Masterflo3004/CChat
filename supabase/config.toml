@@ -418,3 +418,11 @@ enabled = true
 [functions.gif-search]
 enabled = true
 verify_jwt = true
+
+[functions.upload-media]
+enabled = true
+verify_jwt = true
+
+[functions.moderate]
+enabled = true
+verify_jwt = true

@@ -7,6 +7,8 @@ import '../../core/ui.dart';
 import '../../data/models.dart';
 import '../../providers.dart';
 import '../../services/cosmetics_service.dart';
+import '../../services/media_service.dart';
+import '../community/report_dialog.dart';
 
 /// Resolved skin + font for a message style.
 class ResolvedStyle {
@@ -122,24 +124,73 @@ class _MessageBubbleState extends ConsumerState<MessageBubble> {
   }
 
   Future<void> _menu() async {
-    if (!widget.mine) return;
-    final delete = await showModalBottomSheet<bool>(
+    final payload = _message?.payload;
+    final gif = payload?.gif;
+    final style = payload?.style;
+    final actions = <(IconData, String, Future<void> Function())>[
+      if (widget.mine) (Icons.delete_outline, 'Delete message for everyone', _delete),
+      if (!widget.mine && gif != null && gif.source != GifSource.remote)
+        (Icons.flag_outlined, 'Report GIF', _reportGif),
+      if (!widget.mine && style?.skinId != null)
+        (Icons.flag_outlined, 'Report skin', () => _reportCosmetic(ReportTarget.skin, style!.skinId!)),
+      if (!widget.mine && style?.fontId != null)
+        (Icons.flag_outlined, 'Report font', () => _reportCosmetic(ReportTarget.font, style!.fontId!)),
+    ];
+    if (actions.isEmpty) return;
+    final chosen = await showModalBottomSheet<Future<void> Function()>(
       context: context,
       builder: (context) => SafeArea(
-        child: ListTile(
-          leading: const Icon(Icons.delete_outline),
-          title: const Text('Delete message for everyone'),
-          onTap: () => Navigator.pop(context, true),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final (icon, label, action) in actions)
+              ListTile(leading: Icon(icon), title: Text(label), onTap: () => Navigator.pop(context, action)),
+          ],
         ),
       ),
     );
-    if (delete == true) {
-      try {
-        await ref.read(chatServiceProvider).deleteMessage(widget.raw.id);
-      } catch (e) {
-        if (mounted) showError(context, e);
-      }
+    if (chosen == null) return;
+    try {
+      await chosen();
+    } catch (e) {
+      if (mounted) showError(context, e);
     }
+  }
+
+  void _thanks() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Thanks, the moderators will look at it.')));
+  }
+
+  Future<void> _delete() => ref.read(chatServiceProvider).deleteMessage(widget.raw.id);
+
+  Future<void> _reportCosmetic(ReportTarget type, String id) async {
+    final reason = await showReportDialog(context, title: 'Report ${type.name}');
+    if (reason == null) return;
+    await ref.read(communityProvider).report(type, id, reason);
+    _thanks();
+  }
+
+  Future<void> _reportGif() async {
+    final gif = _message!.payload!.gif!;
+    if (gif.source == GifSource.library) {
+      final reason = await showReportDialog(context, title: 'Report GIF');
+      if (reason == null) return;
+      await ref.read(communityProvider).report(ReportTarget.gif, gif.gifId!, reason);
+    } else {
+      final reason = await showReportDialog(
+        context,
+        title: 'Report GIF',
+        warning:
+            'This GIF is end-to-end encrypted, so the moderators can’t see it. Reporting it '
+            'uploads a decrypted copy of this GIF (only the GIF) for the moderators to review.',
+      );
+      if (reason == null) return;
+      final bytes = await ref.read(chatServiceProvider).downloadDecrypted(gif.path!, gif.fileKey!);
+      await ref.read(communityProvider).reportAttachment(bytes, 'reported.gif', reason);
+    }
+    _thanks();
   }
 
   @override
@@ -212,22 +263,50 @@ class _MessageBubbleState extends ConsumerState<MessageBubble> {
   }
 }
 
-/// Shows a GIF from the search provider or an encrypted upload.
-class GifView extends ConsumerWidget {
+/// Shows a GIF from the library, GIPHY, or an encrypted upload. Banned GIFs are hidden.
+class GifView extends ConsumerStatefulWidget {
   const GifView({super.key, required this.gif, this.maxWidth = 260});
   final GifContent gif;
   final double maxWidth;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<GifView> createState() => _GifViewState();
+}
+
+class _GifViewState extends ConsumerState<GifView> {
+  Future<Uint8List>? _bytes;
+
+  @override
+  void initState() {
+    super.initState();
+    final gif = widget.gif;
+    switch (gif.source) {
+      case GifSource.file:
+        // The server can't see encrypted files, so the client checks the hash.
+        _bytes = () async {
+          final bytes = await ref.read(chatServiceProvider).downloadDecrypted(gif.path!, gif.fileKey!);
+          if (await ref.read(mediaProvider).isBanned(bytes)) throw BannedFileException();
+          return bytes;
+        }();
+      case GifSource.library:
+        _bytes = ref.read(mediaProvider).download('gifs', gif.path!);
+      case GifSource.remote:
+        _bytes = null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final gif = widget.gif;
+    final maxWidth = widget.maxWidth;
     final aspect = gif.width > 0 && gif.height > 0 ? gif.width / gif.height : 1.0;
     final width = maxWidth.clamp(80.0, gif.width > 0 ? gif.width.toDouble().clamp(120.0, maxWidth) : maxWidth);
     Widget image;
-    if (gif.isFile) {
+    if (_bytes != null) {
       image = FutureBuilder<Uint8List>(
-        future: ref.read(chatServiceProvider).downloadDecrypted(gif.path!, gif.fileKey!),
+        future: _bytes,
         builder: (context, snap) {
-          if (snap.hasError) return const Center(child: Icon(Icons.broken_image_outlined));
+          if (snap.hasError) return const _Unavailable();
           if (!snap.hasData) return const Center(child: CircularProgressIndicator(strokeWidth: 2));
           return Image.memory(snap.data!, fit: BoxFit.cover, gaplessPlayback: true);
         },
@@ -238,7 +317,7 @@ class GifView extends ConsumerWidget {
         fit: BoxFit.cover,
         gaplessPlayback: true,
         semanticLabel: gif.title,
-        errorBuilder: (_, _, _) => const Center(child: Icon(Icons.broken_image_outlined)),
+        errorBuilder: (_, _, _) => const _Unavailable(),
         loadingBuilder: (context, child, progress) =>
             progress == null ? child : const Center(child: CircularProgressIndicator(strokeWidth: 2)),
       );
@@ -248,4 +327,23 @@ class GifView extends ConsumerWidget {
       child: SizedBox(width: width, height: width / aspect, child: image),
     );
   }
+}
+
+class _Unavailable extends StatelessWidget {
+  const _Unavailable();
+
+  @override
+  Widget build(BuildContext context) => Container(
+    color: Theme.of(context).colorScheme.surfaceContainerHigh,
+    alignment: Alignment.center,
+    padding: const EdgeInsets.all(8),
+    child: const Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.hide_image_outlined),
+        SizedBox(height: 4),
+        Text('GIF unavailable or removed by moderators', textAlign: TextAlign.center, style: TextStyle(fontSize: 12)),
+      ],
+    ),
+  );
 }

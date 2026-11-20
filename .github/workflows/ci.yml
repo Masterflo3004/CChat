@@ -20,7 +20,8 @@ jobs:
           version: latest
 
       - name: Start Supabase and apply migrations
-        run: supabase start -x studio,imgproxy,logflare,vector,supavisor,edge-runtime,mailpit,postgres-meta
+        # edge-runtime stays on: it serves supabase/functions (upload-media, moderate, gif-search)
+        run: supabase start -x studio,imgproxy,logflare,vector,supavisor,mailpit,postgres-meta
 
       - name: Lint database
         run: supabase db lint --level warning --fail-on warning
@@ -41,7 +42,8 @@ jobs:
         working-directory: app
         run: |
           eval "$(supabase status -o env)"
-          SUPABASE_URL="$API_URL" SUPABASE_PUBLISHABLE_KEY="$PUBLISHABLE_KEY" flutter test
+          SUPABASE_URL="$API_URL" SUPABASE_PUBLISHABLE_KEY="$PUBLISHABLE_KEY" \
+            SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" flutter test
 
   build:
     name: Build ${{ matrix.target }}
