@@ -2,6 +2,12 @@
 
 A simple chat app backed by **Supabase**, running on **Web, Android, Linux and Windows** from a single codebase.
 
+> **Status:** implemented in `app/` and `supabase/`. Compared to the original plan, the app adds
+> end-to-end encryption (see [docs/E2EE.md](docs/E2EE.md)), GIFs, message skins and custom fonts.
+> A few choices changed: plain Riverpod providers instead of code generation, no `freezed`, and
+> `cryptography` + `flutter_secure_storage` for E2EE. The "Schema (MVP)" section below is the
+> original sketch. The real schema is in `supabase/migrations/`.
+
 ## TL;DR
 
 | Layer | Choice | Why |

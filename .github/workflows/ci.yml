@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  FLUTTER_VERSION: "3.50.1"
+
+jobs:
+  test:
+    name: Analyze & test (with local Supabase)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Start Supabase and apply migrations
+        run: supabase start -x studio,imgproxy,logflare,vector,supavisor,edge-runtime,mailpit,postgres-meta
+
+      - name: Lint database
+        run: supabase db lint --level warning --fail-on warning
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Analyze
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter analyze
+
+      - name: Unit + integration tests
+        working-directory: app
+        run: |
+          eval "$(supabase status -o env)"
+          SUPABASE_URL="$API_URL" SUPABASE_PUBLISHABLE_KEY="$PUBLISHABLE_KEY" flutter test
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: web, os: ubuntu-latest }
+          - { target: linux, os: ubuntu-latest }
+          - { target: android, os: ubuntu-latest }
+          - { target: windows, os: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Linux build dependencies
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev liblzma-dev
+
+      - uses: actions/setup-java@v4
+        if: matrix.target == 'android'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Write env.json from repository secrets
+        shell: bash
+        working-directory: app
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          printf '{"SUPABASE_URL":"%s","SUPABASE_PUBLISHABLE_KEY":"%s"}' \
+            "${SUPABASE_URL:-https://example.supabase.co}" "${SUPABASE_PUBLISHABLE_KEY:-missing}" > env.json
+
+      - name: Build
+        shell: bash
+        working-directory: app
+        run: |
+          flutter pub get
+          case "${{ matrix.target }}" in
+            web)     flutter build web --release --dart-define-from-file=env.json ;;
+            linux)   flutter build linux --release --dart-define-from-file=env.json ;;
+            android) flutter build apk --release --dart-define-from-file=env.json ;;
+            windows) flutter build windows --release --dart-define-from-file=env.json ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cchat-${{ matrix.target }}
+          path: |
+            app/build/web
+            app/build/linux/x64/release/bundle
+            app/build/app/outputs/flutter-apk/app-release.apk
+            app/build/windows/x64/runner/Release
+          if-no-files-found: ignore
